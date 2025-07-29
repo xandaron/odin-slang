@@ -1,0 +1,7 @@
+D:/Projects/odin-slang/build/CMakeFiles/slang_wrapper.dir
+D:/Projects/odin-slang/build/CMakeFiles/slangc_example.dir
+D:/Projects/odin-slang/build/CMakeFiles/slangc_spirv_example.dir
+D:/Projects/odin-slang/build/CMakeFiles/test_wrapper.dir
+D:/Projects/odin-slang/build/CMakeFiles/INSTALL.dir
+D:/Projects/odin-slang/build/CMakeFiles/ALL_BUILD.dir
+D:/Projects/odin-slang/build/CMakeFiles/ZERO_CHECK.dir

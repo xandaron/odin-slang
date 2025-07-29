@@ -1,0 +1,45 @@
+inputs = [
+    "./slangc.h"
+]
+
+remove_type_prefix = "Slangc"
+
+remove_macro_prefix = "SLANGC_"
+
+remove_function_prefix = "slangc_"
+
+imports_file = "import.odin"
+
+package_name = "slang"
+
+output_folder = "odin-slang"
+
+force_ada_case_types = true
+
+clang_include_paths = [
+
+]
+
+type_overrides = {
+    
+}
+
+clang_defines = {
+    
+}
+
+struct_field_overrides = {
+    
+}
+
+rename = {
+    
+}
+
+bit_setify = {
+    
+}
+
+procedure_type_overrides = {
+    
+}
