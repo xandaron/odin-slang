@@ -1,7 +1,8 @@
 package test
 
-import "core:os/os2"
 import slang "../odin-slang"
+import "core:os/os2"
+import "core:fmt"
 
 main :: proc() {
 	searchPaths := []cstring{"./shaders"}
@@ -29,9 +30,14 @@ main :: proc() {
 		panic("Failed to create session\n")
 	}
 
-	module := slang.loadModule(session, "./shaders/VertexDemo.slang", nil)
+	blob: ^slang.Blob
+	module := slang.loadModule(session, "./shaders/VertexDemo.slang", &blob)
 	if module == nil {
-		panic("Failed to load module\n")
+		fmt.println(slang.getLastError())
+
+		fmt.println(cstring(slang.getBlobData(blob)))
+
+		panic("Failed to load module")
 	}
 
 	vertEntryPoint := slang.findEntryPoint(module, "vertexMain", .VERTEX, nil)
