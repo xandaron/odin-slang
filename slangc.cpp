@@ -1,41 +1,69 @@
 #include "slangc.h"
-#include "slang/include/slang.h"
-#include "slang/include/slang-com-ptr.h"
+#include "include/slang.h"
+#include "include/slang-com-ptr.h"
 #include <string>
 #include <vector>
 #include <memory>
 
 using namespace slang;
-using namespace Slang;
+
+// Global error state for simple error handling
+static thread_local std::string g_lastError;
+static thread_local bool g_hasError = false;
+
+// Helper to set error state
+void setError(const std::string& message) {
+    g_lastError = message;
+    g_hasError = true;
+}
+
+void clearError() {
+    g_lastError.clear();
+    g_hasError = false;
+}
 
 // Internal wrapper structures
 struct SlangcGlobalSession {
-    Slang::ComPtr<slang::IGlobalSession> session;
+    Slang::ComPtr<IGlobalSession> session;
 };
 
 struct SlangcSession {
-    Slang::ComPtr<slang::ISession> session;
+    Slang::ComPtr<ISession> session;
 };
 
 struct SlangcModule {
-    Slang::ComPtr<slang::IModule> module;
+    Slang::ComPtr<IModule> module;
 };
 
 struct SlangcEntryPoint {
-    Slang::ComPtr<slang::IEntryPoint> entryPoint;
+    Slang::ComPtr<IEntryPoint> entryPoint;
 };
 
-struct SlangcComponentType {
-    Slang::ComPtr<slang::IComponentType> componentType;
+// Internal composite wrapper for C++ ComPtr management
+struct SlangcComposite {
+    Slang::ComPtr<IComponentType> composite;
 };
 
 struct SlangcBlob {
     Slang::ComPtr<ISlangBlob> blob;
 };
 
-struct SlangcCompileRequest {
-    Slang::ComPtr<slang::ICompileRequest> request;
-};
+// Helper function to get IComponentType from SlangcComponentType
+IComponentType* getComponentType(const SlangcComponentType* componentType) {
+    if (!componentType) return nullptr;
+    
+    switch (componentType->kind) {
+        case SLANGC_COMPONENT_TYPE_MODULE:
+            return componentType->module ? componentType->module->module.get() : nullptr;
+        case SLANGC_COMPONENT_TYPE_ENTRY_POINT:
+            return componentType->entryPoint ? componentType->entryPoint->entryPoint.get() : nullptr;
+        case SLANGC_COMPONENT_TYPE_COMPOSITE:
+            return componentType->composite ? 
+                static_cast<SlangcComposite*>(componentType->composite)->composite.get() : nullptr;
+        default:
+            return nullptr;
+    }
+}
 
 // Helper functions
 namespace {
@@ -154,45 +182,53 @@ namespace {
                 return SLANG_STAGE_NONE;
         }
     }
+    
+    // Helper to create a wrapper for diagnostics blob
+    void setDiagnosticsOutput(SlangcBlob** outDiagnostics, Slang::ComPtr<ISlangBlob>& diagnostics) {
+        if (outDiagnostics && diagnostics) {
+            auto diagWrapper = std::make_unique<SlangcBlob>();
+            diagWrapper->blob = diagnostics;
+            *outDiagnostics = diagWrapper.release();
+        }
+    }
 }
 
 //
 // Global Session Management
 //
 
-SlangcResult slangc_createGlobalSession(SlangcGlobalSession** outGlobalSession) {
-    if (!outGlobalSession) return SLANGC_E_INVALID_ARG;
-
+SlangcGlobalSession* slangc_createGlobalSession(void) {
+    clearError();
     auto wrapper = std::make_unique<SlangcGlobalSession>();
     
     SlangResult result = slang_createGlobalSession(SLANG_API_VERSION, wrapper->session.writeRef());
     if (SLANG_FAILED(result)) {
-        return convertResult(result);
+        setError("Failed to create global session");
+        return nullptr;
     }
 
-    *outGlobalSession = wrapper.release();
-    return SLANGC_OK;
+    return wrapper.release();
 }
 
-SlangcResult slangc_createGlobalSessionWithDesc(
-    const SlangcGlobalSessionDesc* desc,
-    SlangcGlobalSession** outGlobalSession) {
+SlangcGlobalSession* slangc_createGlobalSessionWithDesc(
+    const SlangcGlobalSessionDesc* desc) {
     
-    if (!desc || !outGlobalSession) return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!desc) {
+        setError("Invalid session description");
+        return nullptr;
+    }
 
     auto wrapper = std::make_unique<SlangcGlobalSession>();
     
-    SlangGlobalSessionDesc slangDesc = {};
-    slangDesc.apiVersion = desc->apiVersion;
-    slangDesc.enableGLSL = desc->enableGLSL;
-
-    SlangResult result = slang_createGlobalSession2(&slangDesc, wrapper->session.writeRef());
+    // Fallback to basic global session creation since slang_createGlobalSession2 may not be available
+    SlangResult result = slang_createGlobalSession(desc->apiVersion, wrapper->session.writeRef());
     if (SLANG_FAILED(result)) {
-        return convertResult(result);
+        setError("Failed to create global session with description");
+        return nullptr;
     }
 
-    *outGlobalSession = wrapper.release();
-    return SLANGC_OK;
+    return wrapper.release();
 }
 
 void slangc_releaseGlobalSession(SlangcGlobalSession* globalSession) {
@@ -208,12 +244,15 @@ SlangcProfileID slangc_findProfile(SlangcGlobalSession* globalSession, const cha
 // Session Management
 //
 
-SlangcResult slangc_createSession(
+SlangcSession* slangc_createSession(
     SlangcGlobalSession* globalSession,
-    const SlangcSessionDesc* desc,
-    SlangcSession** outSession) {
+    const SlangcSessionDesc* desc) {
     
-    if (!globalSession || !outSession) return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!globalSession) {
+        setError("Invalid global session");
+        return nullptr;
+    }
 
     auto wrapper = std::make_unique<SlangcSession>();
     
@@ -237,11 +276,11 @@ SlangcResult slangc_createSession(
 
     SlangResult result = globalSession->session->createSession(sessionDesc, wrapper->session.writeRef());
     if (SLANG_FAILED(result)) {
-        return convertResult(result);
+        setError("Failed to create session");
+        return nullptr;
     }
 
-    *outSession = wrapper.release();
-    return SLANGC_OK;
+    return wrapper.release();
 }
 
 void slangc_releaseSession(SlangcSession* session) {
@@ -252,47 +291,40 @@ void slangc_releaseSession(SlangcSession* session) {
 // Module Loading
 //
 
-SlangcResult slangc_loadModule(
+SlangcModule* slangc_loadModule(
     SlangcSession* session,
     const char* moduleName,
-    SlangcModule** outModule,
     SlangcBlob** outDiagnostics) {
     
-    if (!session || !moduleName || !outModule) return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!session || !moduleName) {
+        setError("Invalid session or module name");
+        return nullptr;
+    }
 
     auto wrapper = std::make_unique<SlangcModule>();
     Slang::ComPtr<ISlangBlob> diagnostics;
     
     wrapper->module = session->session->loadModule(moduleName, diagnostics.writeRef());
     if (!wrapper->module) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return SLANGC_FAIL;
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        setError("Failed to load module");
+        return nullptr;
     }
 
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    *outModule = wrapper.release();
-    return SLANGC_OK;
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    return wrapper.release();
 }
 
-SlangcResult slangc_loadModuleFromSource(
+SlangcModule* slangc_loadModuleFromSource(
     SlangcSession* session,
     const char* moduleName,
     const char* path,
     const char* sourceText,
     size_t sourceSize,
-    SlangcModule** outModule,
     SlangcBlob** outDiagnostics) {
     
-    if (!session || !moduleName || !sourceText || !outModule) return SLANGC_E_INVALID_ARG;
+    if (!session || !moduleName || !sourceText) return nullptr;
 
     auto wrapper = std::make_unique<SlangcModule>();
     Slang::ComPtr<ISlangBlob> diagnostics;
@@ -307,22 +339,12 @@ SlangcResult slangc_loadModuleFromSource(
         moduleName, path, nullptr, diagnostics.writeRef());
     
     if (!wrapper->module) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return SLANGC_FAIL;
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        return nullptr;
     }
 
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    *outModule = wrapper.release();
-    return SLANGC_OK;
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    return wrapper.release();
 }
 
 void slangc_releaseModule(SlangcModule* module) {
@@ -333,14 +355,38 @@ void slangc_releaseModule(SlangcModule* module) {
 // Component Type Management
 //
 
-SlangcResult slangc_findEntryPoint(
+SlangcComponentTypeKind slangc_getComponentTypeKind(SlangcComponentType* componentType) {
+    if (!componentType) {
+        return SLANGC_COMPONENT_TYPE_MODULE; // Default fallback
+    }
+    return componentType->kind;
+}
+
+SlangcModule* slangc_getComponentTypeModule(SlangcComponentType* componentType) {
+    if (!componentType || componentType->kind != SLANGC_COMPONENT_TYPE_MODULE) {
+        return nullptr;
+    }
+    return componentType->module;
+}
+
+SlangcEntryPoint* slangc_getComponentTypeEntryPoint(SlangcComponentType* componentType) {
+    if (!componentType || componentType->kind != SLANGC_COMPONENT_TYPE_ENTRY_POINT) {
+        return nullptr;
+    }
+    return componentType->entryPoint;
+}
+
+SlangcEntryPoint* slangc_findEntryPoint(
     SlangcModule* module,
     const char* entryPointName,
     SlangcStage stage,
-    SlangcEntryPoint** outEntryPoint,
     SlangcBlob** outDiagnostics) {
     
-    if (!module || !entryPointName || !outEntryPoint) return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!module || !entryPointName) {
+        setError("Invalid module or entry point name");
+        return nullptr;
+    }
 
     auto wrapper = std::make_unique<SlangcEntryPoint>();
     Slang::ComPtr<ISlangBlob> diagnostics;
@@ -352,269 +398,182 @@ SlangcResult slangc_findEntryPoint(
         diagnostics.writeRef());
 
     if (SLANG_FAILED(result)) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return convertResult(result);
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        setError("Failed to find entry point");
+        return nullptr;
     }
 
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    *outEntryPoint = wrapper.release();
-    return SLANGC_OK;
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    return wrapper.release();
 }
 
 void slangc_releaseEntryPoint(SlangcEntryPoint* entryPoint) {
     delete entryPoint;
 }
 
-SlangcResult slangc_createModuleComponentType(
-    SlangcSession* session,
-    SlangcModule* module,
-    SlangcEntryPoint* entryPoint,
-    SlangcComponentType** outComponentType,
-    SlangcBlob** outDiagnostics) {
+SlangcComponentType* slangc_createModuleComponentType(SlangcModule* module) {
+    clearError();
+    if (!module) {
+        setError("Invalid module");
+        return nullptr;
+    }
     
-    if (!session || !module || !outComponentType) return SLANGC_E_INVALID_ARG;
-
-    auto wrapper = std::make_unique<SlangcComponentType>();
-    Slang::ComPtr<ISlangBlob> diagnostics;
-    
-    // Create an array of components to combine
-    std::vector<IComponentType*> components;
-    components.push_back(module->module.get());
-    if (entryPoint) {
-        components.push_back(entryPoint->entryPoint.get());
-    }
-
-    SlangResult result = session->session->createCompositeComponentType(
-        components.data(),
-        (SlangInt)components.size(),
-        wrapper->componentType.writeRef(),
-        diagnostics.writeRef());
-
-    if (SLANG_FAILED(result)) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return convertResult(result);
-    }
-
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    *outComponentType = wrapper.release();
-    return SLANGC_OK;
+    auto wrapper = new SlangcComponentType();
+    wrapper->kind = SLANGC_COMPONENT_TYPE_MODULE;
+    wrapper->module = module;
+    return wrapper;
 }
 
-SlangcResult slangc_createEntryPointComponentType(
-    SlangcModule* module,
-    const char* entryPointName,
-    SlangcStage stage,
-    SlangcComponentType** outComponentType,
-    SlangcBlob** outDiagnostics) {
-    
-    if (!module || !entryPointName || !outComponentType) return SLANGC_E_INVALID_ARG;
-
-    auto wrapper = std::make_unique<SlangcComponentType>();
-    Slang::ComPtr<ISlangBlob> diagnostics;
-    
-    // First find the entry point
-    Slang::ComPtr<slang::IEntryPoint> entryPoint;
-    SlangResult result = module->module->findAndCheckEntryPoint(
-        entryPointName,
-        convertStage(stage),
-        entryPoint.writeRef(),
-        diagnostics.writeRef());
-
-    if (SLANG_FAILED(result)) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return convertResult(result);
+SlangcComponentType* slangc_createEntryPointComponentType(SlangcEntryPoint* entryPoint) {
+    clearError();
+    if (!entryPoint) {
+        setError("Invalid entry point");
+        return nullptr;
     }
-
-    // Note: This function creates a component type from entry point only
-    // In practice, you would typically combine this with the module
-    wrapper->componentType = entryPoint;
-
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    *outComponentType = wrapper.release();
-    return SLANGC_OK;
+    
+    auto wrapper = new SlangcComponentType();
+    wrapper->kind = SLANGC_COMPONENT_TYPE_ENTRY_POINT;
+    wrapper->entryPoint = entryPoint;
+    return wrapper;
 }
 
-SlangcResult slangc_createCompositeComponentType(
+SlangcComponentType* slangc_createCompositeComponentType(
     SlangcSession* session,
-    SlangcComponentType* const* componentTypes,
+    const SlangcComponentType* componentTypes,
     int32_t componentTypeCount,
-    SlangcComponentType** outComposite,
     SlangcBlob** outDiagnostics) {
     
-    if (!session || !componentTypes || componentTypeCount <= 0 || !outComposite) {
-        return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!session || !componentTypes || componentTypeCount <= 0) {
+        setError("Invalid parameters for composite component type");
+        return nullptr;
     }
 
-    auto wrapper = std::make_unique<SlangcComponentType>();
+    auto compositeWrapper = new SlangcComposite();
     Slang::ComPtr<ISlangBlob> diagnostics;
     
     std::vector<IComponentType*> slangComponents(componentTypeCount);
     for (int32_t i = 0; i < componentTypeCount; i++) {
-        slangComponents[i] = componentTypes[i]->componentType.get();
+        slangComponents[i] = getComponentType(&componentTypes[i]);
+        if (!slangComponents[i]) {
+            delete compositeWrapper;
+            setError("Invalid component type in array");
+            return nullptr;
+        }
     }
 
     SlangResult result = session->session->createCompositeComponentType(
         slangComponents.data(),
         componentTypeCount,
-        wrapper->componentType.writeRef(),
+        compositeWrapper->composite.writeRef(),
         diagnostics.writeRef());
 
     if (SLANG_FAILED(result)) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return convertResult(result);
+        delete compositeWrapper;
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        setError("Failed to create composite component type");
+        return nullptr;
     }
 
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
+    auto wrapper = new SlangcComponentType();
+    wrapper->kind = SLANGC_COMPONENT_TYPE_COMPOSITE;
+    wrapper->composite = compositeWrapper;
+    
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    return wrapper;
+}
+
+SlangcComponentType* slangc_linkComponentType(
+    SlangcComponentType* componentType,
+    SlangcBlob** outDiagnostics) {
+    
+    clearError();
+    if (!componentType) {
+        setError("Invalid component type");
+        return nullptr;
     }
 
-    *outComposite = wrapper.release();
-    return SLANGC_OK;
+    IComponentType* slangComponentType = getComponentType(componentType);
+    if (!slangComponentType) {
+        setError("Invalid component type");
+        return nullptr;
+    }
+
+    auto linkedCompositeWrapper = new SlangcComposite();
+    Slang::ComPtr<ISlangBlob> diagnostics;
+    
+    SlangResult result = slangComponentType->link(
+        linkedCompositeWrapper->composite.writeRef(),
+        diagnostics.writeRef());
+
+    if (SLANG_FAILED(result)) {
+        delete linkedCompositeWrapper;
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        setError("Failed to link component type");
+        return nullptr;
+    }
+
+    auto wrapper = new SlangcComponentType();
+    wrapper->kind = SLANGC_COMPONENT_TYPE_COMPOSITE;
+    wrapper->composite = linkedCompositeWrapper;
+    
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    return wrapper;
 }
 
 void slangc_releaseComponentType(SlangcComponentType* componentType) {
+    if (!componentType) return;
+    
+    // Clean up composite wrapper if it exists
+    if (componentType->kind == SLANGC_COMPONENT_TYPE_COMPOSITE && componentType->composite) {
+        delete static_cast<SlangcComposite*>(componentType->composite);
+    }
+    
     delete componentType;
 }
 
-SlangcResult slangc_getEntryPointCode(
+SlangcBlob* slangc_getEntryPointCode(
     SlangcComponentType* componentType,
     int32_t entryPointIndex,
     int32_t targetIndex,
-    SlangcBlob** outCode,
     SlangcBlob** outDiagnostics) {
     
-    if (!componentType || !outCode) return SLANGC_E_INVALID_ARG;
+    clearError();
+    if (!componentType) {
+        setError("Invalid component type");
+        return nullptr;
+    }
 
     Slang::ComPtr<ISlangBlob> codeBlob;
     Slang::ComPtr<ISlangBlob> diagnostics;
     
-    SlangResult result = componentType->componentType->getEntryPointCode(
+    IComponentType* slangComponentType = getComponentType(componentType);
+    if (!slangComponentType) {
+        setError("Invalid component type");
+        return nullptr;
+    }
+    
+    SlangResult result = slangComponentType->getEntryPointCode(
         entryPointIndex,
         targetIndex,
         codeBlob.writeRef(),
         diagnostics.writeRef());
 
     if (SLANG_FAILED(result)) {
-        if (outDiagnostics && diagnostics) {
-            auto diagWrapper = std::make_unique<SlangcBlob>();
-            diagWrapper->blob = diagnostics;
-            *outDiagnostics = diagWrapper.release();
-        }
-        return convertResult(result);
+        setDiagnosticsOutput(outDiagnostics, diagnostics);
+        setError("Failed to get entry point code");
+        return nullptr;
     }
 
+    setDiagnosticsOutput(outDiagnostics, diagnostics);
+    
     if (codeBlob) {
         auto codeWrapper = std::make_unique<SlangcBlob>();
         codeWrapper->blob = codeBlob;
-        *outCode = codeWrapper.release();
+        return codeWrapper.release();
     }
 
-    if (outDiagnostics && diagnostics) {
-        auto diagWrapper = std::make_unique<SlangcBlob>();
-        diagWrapper->blob = diagnostics;
-        *outDiagnostics = diagWrapper.release();
-    }
-
-    return SLANGC_OK;
-}
-
-//
-// Compilation
-//
-
-SlangcResult slangc_createCompileRequest(
-    SlangcSession* session,
-    SlangcCompileRequest** outCompileRequest) {
-    
-    if (!session || !outCompileRequest) return SLANGC_E_INVALID_ARG;
-
-    // Note: This is using the deprecated compile request API
-    // For production use, prefer the component type API
-    return SLANGC_E_NOT_IMPLEMENTED;
-}
-
-int32_t slangc_addTranslationUnit(
-    SlangcCompileRequest* request,
-    SlangcSourceLanguage language,
-    const char* path,
-    const char* source) {
-    
-    // Not implemented - use the modern component type API instead
-    return -1;
-}
-
-int32_t slangc_addEntryPoint(
-    SlangcCompileRequest* request,
-    int32_t translationUnitIndex,
-    const char* name,
-    SlangcStage stage) {
-    
-    // Not implemented - use the modern component type API instead
-    return -1;
-}
-
-SlangcResult slangc_setTarget(SlangcCompileRequest* request, SlangcCompileTarget target) {
-    // Not implemented - use the modern component type API instead
-    return SLANGC_E_NOT_IMPLEMENTED;
-}
-
-SlangcResult slangc_compile(SlangcCompileRequest* request) {
-    // Not implemented - use the modern component type API instead
-    return SLANGC_E_NOT_IMPLEMENTED;
-}
-
-SlangcResult slangc_getCompiledCode(
-    SlangcCompileRequest* request,
-    int32_t entryPointIndex,
-    SlangcBlob** outCode) {
-    
-    // Not implemented - use the modern component type API instead
-    return SLANGC_E_NOT_IMPLEMENTED;
-}
-
-SlangcResult slangc_getDiagnosticOutput(
-    SlangcCompileRequest* request,
-    SlangcBlob** outDiagnostics) {
-    
-    // Not implemented - use the modern component type API instead
-    return SLANGC_E_NOT_IMPLEMENTED;
-}
-
-void slangc_releaseCompileRequest(SlangcCompileRequest* request) {
-    delete request;
+    return nullptr;
 }
 
 //
@@ -650,4 +609,20 @@ void slangc_shutdown(void) {
 
 const char* slangc_getLastErrorMessage(void) {
     return slang_getLastInternalErrorMessage();
+}
+
+//
+// Error Handling
+//
+
+bool slangc_hasError(void) {
+    return g_hasError;
+}
+
+const char* slangc_getLastError(void) {
+    return g_hasError ? g_lastError.c_str() : nullptr;
+}
+
+void slangc_clearError(void) {
+    clearError();
 }

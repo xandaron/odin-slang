@@ -9,16 +9,31 @@ extern "C" {
 #include <stddef.h>
 #include <stdbool.h>
 
+// Component type - can be either a module, entry point, or composite
+typedef enum SlangcComponentTypeKind {
+    SLANGC_COMPONENT_TYPE_MODULE,
+    SLANGC_COMPONENT_TYPE_ENTRY_POINT,
+    SLANGC_COMPONENT_TYPE_COMPOSITE
+} SlangcComponentTypeKind;
+
+// Component type struct - exposed so users can access it directly
+typedef struct SlangcComponentType {
+    SlangcComponentTypeKind kind;
+    union {
+        struct SlangcModule* module;
+        struct SlangcEntryPoint* entryPoint;
+        void* composite;  // Opaque pointer to internal composite type
+    };
+} SlangcComponentType;
+
 // Forward declarations for opaque handles
 typedef struct SlangcGlobalSession SlangcGlobalSession;
 typedef struct SlangcSession SlangcSession;
 typedef struct SlangcModule SlangcModule;
 typedef struct SlangcEntryPoint SlangcEntryPoint;
-typedef struct SlangcComponentType SlangcComponentType;
 typedef struct SlangcBlob SlangcBlob;
-typedef struct SlangcCompileRequest SlangcCompileRequest;
 
-// Result codes
+// Result codes (still useful for some functions)
 typedef int32_t SlangcResult;
 #define SLANGC_OK 0
 #define SLANGC_FAIL -1
@@ -26,6 +41,21 @@ typedef int32_t SlangcResult;
 #define SLANGC_E_INVALID_ARG -3
 #define SLANGC_E_OUT_OF_MEMORY -4
 #define SLANGC_E_BUFFER_TOO_SMALL -5
+
+// Error handling - for functions that return pointers directly
+/** Check if the last operation succeeded.
+ * @return true if the last operation succeeded, false otherwise
+ */
+bool slangc_hasError(void);
+
+/** Get the last error message.
+ * @return Error message string (do not free), or NULL if no error
+ */
+const char* slangc_getLastError(void);
+
+/** Clear the last error state.
+ */
+void slangc_clearError(void);
 
 // API version
 #define SLANGC_API_VERSION 1
@@ -110,19 +140,16 @@ typedef struct SlangcGlobalSessionDesc {
 //
 
 /** Create a global session with default settings.
- * @param outGlobalSession Pointer to receive the created global session
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the created global session, or NULL on failure
  */
-SlangcResult slangc_createGlobalSession(SlangcGlobalSession** outGlobalSession);
+SlangcGlobalSession* slangc_createGlobalSession(void);
 
 /** Create a global session with custom settings.
  * @param desc Description of the global session configuration
- * @param outGlobalSession Pointer to receive the created global session
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the created global session, or NULL on failure
  */
-SlangcResult slangc_createGlobalSessionWithDesc(
-    const SlangcGlobalSessionDesc* desc,
-    SlangcGlobalSession** outGlobalSession);
+SlangcGlobalSession* slangc_createGlobalSessionWithDesc(
+    const SlangcGlobalSessionDesc* desc);
 
 /** Release a global session and free its resources.
  * @param globalSession The global session to release
@@ -143,13 +170,11 @@ SlangcProfileID slangc_findProfile(SlangcGlobalSession* globalSession, const cha
 /** Create a compilation session.
  * @param globalSession The global session
  * @param desc Session description (can be NULL for defaults)
- * @param outSession Pointer to receive the created session
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the created session, or NULL on failure
  */
-SlangcResult slangc_createSession(
+SlangcSession* slangc_createSession(
     SlangcGlobalSession* globalSession,
-    const SlangcSessionDesc* desc,
-    SlangcSession** outSession);
+    const SlangcSessionDesc* desc);
 
 /** Release a session and free its resources.
  * @param session The session to release
@@ -163,14 +188,12 @@ void slangc_releaseSession(SlangcSession* session);
 /** Load a module by name (for import statements).
  * @param session The compilation session
  * @param moduleName The name of the module to load
- * @param outModule Pointer to receive the loaded module
  * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the loaded module, or NULL on failure
  */
-SlangcResult slangc_loadModule(
+SlangcModule* slangc_loadModule(
     SlangcSession* session,
     const char* moduleName,
-    SlangcModule** outModule,
     SlangcBlob** outDiagnostics);
 
 /** Load a module from source code.
@@ -179,17 +202,15 @@ SlangcResult slangc_loadModule(
  * @param path The file path (for error reporting)
  * @param sourceText The source code text
  * @param sourceSize The size of the source code (or 0 if null-terminated)
- * @param outModule Pointer to receive the loaded module
  * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the loaded module, or NULL on failure
  */
-SlangcResult slangc_loadModuleFromSource(
+SlangcModule* slangc_loadModuleFromSource(
     SlangcSession* session,
     const char* moduleName,
     const char* path,
     const char* sourceText,
     size_t sourceSize,
-    SlangcModule** outModule,
     SlangcBlob** outDiagnostics);
 
 /** Release a module.
@@ -201,34 +222,48 @@ void slangc_releaseModule(SlangcModule* module);
 // Component Type Management
 //
 
+/** Get the kind of a component type.
+ * @param componentType The component type to query
+ * @return The kind of component type, or SLANGC_COMPONENT_TYPE_MODULE if invalid
+ */
+SlangcComponentTypeKind slangc_getComponentTypeKind(SlangcComponentType* componentType);
+
+/** Get the underlying module from a module component type.
+ * @param componentType The component type (must be SLANGC_COMPONENT_TYPE_MODULE)
+ * @return Pointer to the module, or NULL if not a module component type
+ */
+SlangcModule* slangc_getComponentTypeModule(SlangcComponentType* componentType);
+
+/** Get the underlying entry point from an entry point component type.
+ * @param componentType The component type (must be SLANGC_COMPONENT_TYPE_ENTRY_POINT)
+ * @return Pointer to the entry point, or NULL if not an entry point component type
+ */
+SlangcEntryPoint* slangc_getComponentTypeEntryPoint(SlangcComponentType* componentType);
+
 /** Create a composite component type from multiple components.
  * @param session The compilation session
- * @param componentTypes Array of component types to combine
+ * @param componentTypes Array of component type structs to combine
  * @param componentTypeCount Number of component types
- * @param outComposite Pointer to receive the composite component type
  * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the composite component type, or NULL on failure
  */
-SlangcResult slangc_createCompositeComponentType(
+SlangcComponentType* slangc_createCompositeComponentType(
     SlangcSession* session,
-    SlangcComponentType* const* componentTypes,
+    const SlangcComponentType* componentTypes,
     int32_t componentTypeCount,
-    SlangcComponentType** outComposite,
     SlangcBlob** outDiagnostics);
 
 /** Find and check an entry point in a module.
  * @param module The loaded module
  * @param entryPointName The name of the entry point function
  * @param stage The shader stage for the entry point
- * @param outEntryPoint Pointer to receive the entry point
  * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the entry point, or NULL on failure
  */
-SlangcResult slangc_findEntryPoint(
+SlangcEntryPoint* slangc_findEntryPoint(
     SlangcModule* module,
     const char* entryPointName,
     SlangcStage stage,
-    SlangcEntryPoint** outEntryPoint,
     SlangcBlob** outDiagnostics);
 
 /** Release an entry point.
@@ -236,34 +271,39 @@ SlangcResult slangc_findEntryPoint(
  */
 void slangc_releaseEntryPoint(SlangcEntryPoint* entryPoint);
 
-/** Create a component type from a module and entry point.
- * @param session The compilation session
- * @param module The module containing the entry point
- * @param entryPoint The entry point
- * @param outComponentType Pointer to receive the component type
- * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+/** Create a component type from a module.
+ * @param module The module to wrap as a component type
+ * @return Pointer to the component type, or NULL on failure
  */
-SlangcResult slangc_createModuleComponentType(
-    SlangcSession* session,
-    SlangcModule* module,
-    SlangcEntryPoint* entryPoint,
-    SlangcComponentType** outComponentType,
+SlangcComponentType* slangc_createModuleComponentType(SlangcModule* module);
+
+/** Create a component type from an entry point.
+ * @param entryPoint The entry point to wrap as a component type
+ * @return Pointer to the component type, or NULL on failure
+ */
+SlangcComponentType* slangc_createEntryPointComponentType(SlangcEntryPoint* entryPoint);
+
+/** Link a component type to produce a linked program.
+ * @param componentType The component type to link
+ * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
+ * @return Pointer to the linked component type, or NULL on failure
+ */
+SlangcComponentType* slangc_linkComponentType(
+    SlangcComponentType* componentType,
     SlangcBlob** outDiagnostics);
 
 /** Get entry point code for a specific entry point and target.
- * @param componentType The component type to compile
- * @param entryPointIndex The entry point index (0-based)
+ * @param componentType The component type to compile (must be fully linked)
+ * @param entryPointIndex The entry point index (0-based). For simple cases with one entry point, use 0.
+ *                        For composite types, this corresponds to the order entry points were added.
  * @param targetIndex The target index (0-based, from session targets)
- * @param outCode Pointer to receive the compiled code
  * @param outDiagnostics Pointer to receive diagnostic messages (can be NULL)
- * @return SLANGC_OK on success, error code on failure
+ * @return Pointer to the compiled code blob, or NULL on failure
  */
-SlangcResult slangc_getEntryPointCode(
+SlangcBlob* slangc_getEntryPointCode(
     SlangcComponentType* componentType,
     int32_t entryPointIndex,
     int32_t targetIndex,
-    SlangcBlob** outCode,
     SlangcBlob** outDiagnostics);
 
 /** Release a component type.
@@ -272,81 +312,8 @@ SlangcResult slangc_getEntryPointCode(
 void slangc_releaseComponentType(SlangcComponentType* componentType);
 
 //
-// Compilation (Legacy API)
+// Blob Management
 //
-
-/** Create a simple compile request (legacy interface).
- * @param session The compilation session
- * @param outCompileRequest Pointer to receive the compile request
- * @return SLANGC_OK on success, error code on failure
- */
-SlangcResult slangc_createCompileRequest(
-    SlangcSession* session,
-    SlangcCompileRequest** outCompileRequest);
-
-/** Add source code to a compile request.
- * @param request The compile request
- * @param language The source language
- * @param path The file path (for error reporting)
- * @param source The source code
- * @return The translation unit index, or -1 on error
- */
-int32_t slangc_addTranslationUnit(
-    SlangcCompileRequest* request,
-    SlangcSourceLanguage language,
-    const char* path,
-    const char* source);
-
-/** Add an entry point to a compile request.
- * @param request The compile request
- * @param translationUnitIndex The translation unit containing the entry point
- * @param name The entry point function name
- * @param stage The shader stage
- * @return The entry point index, or -1 on error
- */
-int32_t slangc_addEntryPoint(
-    SlangcCompileRequest* request,
-    int32_t translationUnitIndex,
-    const char* name,
-    SlangcStage stage);
-
-/** Set the target for compilation.
- * @param request The compile request
- * @param target The compilation target
- * @return SLANGC_OK on success, error code on failure
- */
-SlangcResult slangc_setTarget(SlangcCompileRequest* request, SlangcCompileTarget target);
-
-/** Perform compilation.
- * @param request The compile request
- * @return SLANGC_OK on success, error code on failure
- */
-SlangcResult slangc_compile(SlangcCompileRequest* request);
-
-/** Get compiled code from a compile request.
- * @param request The compile request
- * @param entryPointIndex The entry point index
- * @param outCode Pointer to receive the compiled code blob
- * @return SLANGC_OK on success, error code on failure
- */
-SlangcResult slangc_getCompiledCode(
-    SlangcCompileRequest* request,
-    int32_t entryPointIndex,
-    SlangcBlob** outCode);
-
-/** Get diagnostic output from a compile request.
- * @param request The compile request
- * @param outDiagnostics Pointer to receive the diagnostic blob
- * @return SLANGC_OK on success, error code on failure
- */
-SlangcResult slangc_getDiagnosticOutput(
-    SlangcCompileRequest* request,
-    SlangcBlob** outDiagnostics);
-
-/** Release a compile request.
- * @param request The compile request to release
- */
-void slangc_releaseCompileRequest(SlangcCompileRequest* request);
 
 //
 // Blob Management
