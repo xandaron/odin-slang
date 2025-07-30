@@ -1,7 +1,7 @@
 package test
 
 import "core:os/os2"
-import slang "odin-slang"
+import slang "../odin-slang"
 
 main :: proc() {
 	searchPaths := []cstring{"./shaders"}
