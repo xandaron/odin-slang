@@ -1,155 +1,142 @@
 package test
 
 import slang "../odin-slang"
-import "core:os/os2"
 import "core:fmt"
+import "core:os"
+
+// Prints diagnostics produced by a Slang call, if any, and releases the blob.
+print_diagnostics :: proc(diagnostics: ^slang.IBlob) {
+	if diagnostics == nil {
+		return
+	}
+	defer diagnostics->Release()
+	fmt.eprintln(cstring(diagnostics->GetBufferPointer()))
+}
+
+write_blob_to_file :: proc(path: string, blob: ^slang.IBlob) {
+	defer blob->Release()
+	data := ([^]u8)(blob->GetBufferPointer())[:blob->GetBufferSize()]
+	file, _ := os.open(path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC)
+	defer os.close(file)
+	os.write(file, data)
+}
 
 main :: proc() {
-	searchPaths := []cstring{"./shaders"}
-
-	desc := slang.Global_Session_Desc {
-		searchPaths     = raw_data(searchPaths),
-		searchPathCount = i32(len(searchPaths)),
+	global_session: ^slang.IGlobalSession
+	if slang.failed(slang.createGlobalSession(slang.API_VERSION, &global_session)) {
+		panic("Failed to create global session")
 	}
-	globalSession := slang.createGlobalSessionWithDesc(&desc)
-	if globalSession == nil {
-		panic("Failed to create global session\n")
+	defer global_session->Release()
+
+	search_paths := []cstring{"./shaders"}
+
+	target := slang.target_desc_default()
+	target.format = .GLSL
+	targets := []slang.Target_Desc{target}
+
+	session_desc := slang.session_desc_default()
+	session_desc.targets = raw_data(targets)
+	session_desc.targetCount = len(targets)
+	session_desc.searchPaths = raw_data(search_paths)
+	session_desc.searchPathCount = len(search_paths)
+
+	session: ^slang.ISession
+	if slang.failed(global_session->CreateSession(&session_desc, &session)) {
+		panic("Failed to create session")
 	}
+	defer session->Release()
 
-	compileTargets := []slang.Compile_Target{.GLSL}
-	sessionDesc := slang.Session_Desc {
-		targets                = raw_data(compileTargets),
-		targetCount            = i32(len(compileTargets)),
-		searchPaths            = raw_data(searchPaths),
-		searchPathCount        = i32(len(searchPaths)),
-		preprocessorMacros     = nil,
-		preprocessorMacroCount = 0,
-	}
-	session := slang.createSession(globalSession, &sessionDesc)
-	if session == nil {
-		panic("Failed to create session\n")
-	}
+	diagnostics: ^slang.IBlob
 
-	blob: ^slang.Blob
-	module := slang.loadModule(session, "./shaders/VertexDemo.slang", &blob)
-	if module == nil {
-		fmt.println(slang.getLastError())
+	// --- Vertex + fragment shaders ---
 
-		fmt.println(cstring(slang.getBlobData(blob)))
-
+	vertex_module := session->LoadModule("./shaders/VertexDemo.slang", &diagnostics)
+	print_diagnostics(diagnostics)
+	if vertex_module == nil {
 		panic("Failed to load module")
 	}
+	defer vertex_module->Release()
 
-	vertEntryPoint := slang.findEntryPoint(module, "vertexMain", .VERTEX, nil)
-	if vertEntryPoint == nil {
-		panic("Failed to find entry point\n")
+	vert_entry_point: ^slang.IEntryPoint
+	if slang.failed(vertex_module->FindAndCheckEntryPoint("vertexMain", .VERTEX, &vert_entry_point, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to find entry point")
 	}
+	defer vert_entry_point->Release()
 
-	fragEntryPoint := slang.findEntryPoint(module, "fragmentMain", .FRAGMENT, nil)
-	if fragEntryPoint == nil {
-		panic("Failed to find entry point\n")
+	frag_entry_point: ^slang.IEntryPoint
+	if slang.failed(vertex_module->FindAndCheckEntryPoint("fragmentMain", .FRAGMENT, &frag_entry_point, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to find entry point")
 	}
+	defer frag_entry_point->Release()
 
-	components := []slang.Component_Type {
-		{kind = .MODULE, module = module},
-		{kind = .ENTRY_POINT, entryPoint = vertEntryPoint},
-		{kind = .ENTRY_POINT, entryPoint = fragEntryPoint},
+	components := []^slang.IComponentType{vertex_module, vert_entry_point, frag_entry_point}
+	program: ^slang.IComponentType
+	if slang.failed(session->CreateCompositeComponentType(raw_data(components), len(components), &program, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to create program")
 	}
-	program := slang.createCompositeComponentType(
-		session,
-		raw_data(components),
-		i32(len(components)),
-		nil,
-	)
-	if program == nil {
-		panic("Failed to create program\n")
+	defer program->Release()
+
+	linked_program: ^slang.IComponentType
+	if slang.failed(program->Link(&linked_program, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to link program")
 	}
+	defer linked_program->Release()
 
-	linkedProgram := slang.linkComponentType(program, nil)
-	if linkedProgram == nil {
-		panic("Failed to link program\n")
+	vert_code: ^slang.IBlob
+	if slang.failed(linked_program->GetEntryPointCode(0, 0, &vert_code, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to get vertex entry point code")
 	}
+	write_blob_to_file("vert.glsl", vert_code)
 
-	codeBlob := slang.getEntryPointCode(linkedProgram, 0, 0, nil)
-	if codeBlob == nil {
-		panic("Failed to get entry point code\n")
+	frag_code: ^slang.IBlob
+	if slang.failed(linked_program->GetEntryPointCode(1, 0, &frag_code, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to get fragment entry point code")
 	}
+	write_blob_to_file("frag.glsl", frag_code)
 
-	codeString := (cstring)(slang.getBlobData(codeBlob))
+	// --- Compute shader ---
 
-	file, _ := os2.open("vert.glsl", os2.O_WRONLY | os2.O_CREATE | os2.O_TRUNC)
-	os2.write(file, transmute([]u8)(string(codeString)))
-	os2.close(file)
-
-	slang.releaseBlob(codeBlob)
-
-	codeBlob = slang.getEntryPointCode(linkedProgram, 0, 0, nil)
-	if codeBlob == nil {
-		panic("Failed to get entry point code\n")
+	compute_module := session->LoadModule("./shaders/ComputeDemo.slang", &diagnostics)
+	print_diagnostics(diagnostics)
+	if compute_module == nil {
+		panic("Failed to load module")
 	}
+	defer compute_module->Release()
 
-	codeString = (cstring)(slang.getBlobData(codeBlob))
-
-	file, _ = os2.open("frag.glsl", os2.O_WRONLY | os2.O_CREATE | os2.O_TRUNC)
-	os2.write(file, transmute([]u8)(string(codeString)))
-	os2.close(file)
-
-	slang.releaseBlob(codeBlob)
-
-	slang.releaseComponentType(linkedProgram)
-	slang.releaseComponentType(program)
-	slang.releaseEntryPoint(vertEntryPoint)
-	slang.releaseEntryPoint(fragEntryPoint)
-	slang.releaseModule(module)
-
-	module = slang.loadModule(session, "./shaders/ComputeDemo.slang", nil)
-	if module == nil {
-		panic("Failed to load module\n")
+	compute_entry_point: ^slang.IEntryPoint
+	if slang.failed(compute_module->FindAndCheckEntryPoint("computeMain", .COMPUTE, &compute_entry_point, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to find entry point")
 	}
+	defer compute_entry_point->Release()
 
-	compEntryPoint := slang.findEntryPoint(module, "computeMain", .COMPUTE, nil)
-	if compEntryPoint == nil {
-		panic("Failed to find entry point\n")
+	compute_components := []^slang.IComponentType{compute_module, compute_entry_point}
+	compute_program: ^slang.IComponentType
+	if slang.failed(session->CreateCompositeComponentType(raw_data(compute_components), len(compute_components), &compute_program, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to create program")
 	}
+	defer compute_program->Release()
 
-	components = []slang.Component_Type {
-		{kind = .MODULE, module = module},
-		{kind = .ENTRY_POINT, entryPoint = compEntryPoint},
+	linked_compute_program: ^slang.IComponentType
+	if slang.failed(compute_program->Link(&linked_compute_program, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to link program")
 	}
-	program = slang.createCompositeComponentType(
-		session,
-		raw_data(components),
-		i32(len(components)),
-		nil,
-	)
-	if program == nil {
-		panic("Failed to create program\n")
+	defer linked_compute_program->Release()
+
+	compute_code: ^slang.IBlob
+	if slang.failed(linked_compute_program->GetEntryPointCode(0, 0, &compute_code, &diagnostics)) {
+		print_diagnostics(diagnostics)
+		panic("Failed to get compute entry point code")
 	}
+	write_blob_to_file("comp.glsl", compute_code)
 
-	linkedProgram = slang.linkComponentType(program, nil)
-	if linkedProgram == nil {
-		panic("Failed to link program\n")
-	}
-
-	codeBlob = slang.getEntryPointCode(linkedProgram, 0, 0, nil)
-	if codeBlob == nil {
-		panic("Failed to get entry point code\n")
-	}
-
-	codeString = (cstring)(slang.getBlobData(codeBlob))
-
-	file, _ = os2.open("comp.glsl", os2.O_WRONLY | os2.O_CREATE | os2.O_TRUNC)
-	os2.write(file, transmute([]u8)(string(codeString)))
-	os2.close(file)
-
-	slang.releaseBlob(codeBlob)
-
-	slang.releaseComponentType(linkedProgram)
-	slang.releaseComponentType(program)
-	slang.releaseEntryPoint(compEntryPoint)
-	slang.releaseModule(module)
-
-	slang.releaseSession(session)
-	slang.releaseGlobalSession(globalSession)
 	slang.shutdown()
 }

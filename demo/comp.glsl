@@ -1,11 +1,11 @@
-#version 460
+#version 450
 #extension GL_EXT_samplerless_texture_functions : require
 #extension GL_KHR_memory_scope_semantics : require
 layout(column_major) uniform;
 layout(column_major) buffer;
 
-#line 16 0
-struct SLANG_ParameterGroup_ComputeConstants_std140_0
+#line 9 0
+struct SLANG_ParameterGroup_ComputeConstants_0
 {
     uvec2 textureSize_0;
     float time_0;
@@ -18,7 +18,7 @@ struct SLANG_ParameterGroup_ComputeConstants_std140_0
 
 #line 9
 layout(binding = 0)
-layout(std140) uniform block_SLANG_ParameterGroup_ComputeConstants_std140_0
+layout(std140) uniform block_SLANG_ParameterGroup_ComputeConstants_0
 {
     uvec2 textureSize_0;
     float time_0;
@@ -56,7 +56,7 @@ void main()
     bool _S1;
 
 
-    if(pixelCoord_0.x >= ComputeConstants_0.textureSize_0.x)
+    if((pixelCoord_0.x) >= (ComputeConstants_0.textureSize_0.x))
     {
 
 #line 33
@@ -68,7 +68,7 @@ void main()
     {
 
 #line 33
-        _S1 = pixelCoord_0.y >= ComputeConstants_0.textureSize_0.y;
+        _S1 = (pixelCoord_0.y) >= (ComputeConstants_0.textureSize_0.y);
 
 #line 33
     }
@@ -101,23 +101,17 @@ void main()
     vec3 finalColor_0 = mix((texelFetch((inputTexture_0), ((_S2)).xy, ((_S2)).z)).xyz, vec3(0.5 + 0.5 * sin(_S3 * 10.0 + ComputeConstants_0.time_0), 0.5 + 0.5 * sin(_S4 * 10.0 + ComputeConstants_0.time_0 * 1.29999995231628418), 0.5 + 0.5 * sin((_S3 + _S4) * 5.0 + ComputeConstants_0.time_0 * 0.69999998807907104)) * ((sin(distance_0 * 20.0 - ComputeConstants_0.time_0 * 5.0) * 0.5 + 0.5) * ComputeConstants_0.intensity_0), vec3(smoothstep(0.0, ComputeConstants_0.radius_0, distance_0) * (1.0 - smoothstep(ComputeConstants_0.radius_0, ComputeConstants_0.radius_0 + 0.10000000149011612, distance_0))));
 
 
-    uint _S5 = gl_LocalInvocationID.x;
-
-#line 64
-    uint _S6 = gl_LocalInvocationID.y;
-
-#line 64
-    sharedData_0[_S5][_S6] = vec4(finalColor_0, 1.0);
+    sharedData_0[gl_LocalInvocationID.x][gl_LocalInvocationID.y] = vec4(finalColor_0, 1.0);
 
 
     controlBarrier(gl_ScopeWorkgroup, gl_ScopeWorkgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
 
 
-    if(_S5 > 0U)
+    if((gl_LocalInvocationID.x) > 0U)
     {
 
 #line 70
-        _S1 = _S5 < 15U;
+        _S1 = (gl_LocalInvocationID.x) < 15U;
 
 #line 70
     }
@@ -135,7 +129,7 @@ void main()
     {
 
 #line 70
-        _S1 = _S6 > 0U;
+        _S1 = (gl_LocalInvocationID.y) > 0U;
 
 #line 70
     }
@@ -151,7 +145,7 @@ void main()
     {
 
 #line 71
-        _S1 = _S6 < 15U;
+        _S1 = (gl_LocalInvocationID.y) < 15U;
 
 #line 71
     }
@@ -171,14 +165,8 @@ void main()
     if(_S1)
     {
 
-
-        uint _S7 = _S6 - 1U;
-
-#line 80
-        uint _S8 = _S6 + 1U;
-
-#line 80
-        finalColor_1 = mix(finalColor_0, ((sharedData_0[_S5 - 1U][_S7] + sharedData_0[_S5][_S7] + sharedData_0[_S5 + 1U][_S7] + sharedData_0[_S5 - 1U][_S6] + sharedData_0[_S5][_S6] * 4.0 + sharedData_0[_S5 + 1U][_S6] + sharedData_0[_S5 - 1U][_S8] + sharedData_0[_S5][_S8] + sharedData_0[_S5 + 1U][_S8]) / 12.0).xyz, vec3(0.10000000149011612));
+#line 70
+        finalColor_1 = mix(finalColor_0, ((sharedData_0[gl_LocalInvocationID.x - 1U][gl_LocalInvocationID.y - 1U] + sharedData_0[gl_LocalInvocationID.x][gl_LocalInvocationID.y - 1U] + sharedData_0[gl_LocalInvocationID.x + 1U][gl_LocalInvocationID.y - 1U] + sharedData_0[gl_LocalInvocationID.x - 1U][gl_LocalInvocationID.y] + sharedData_0[gl_LocalInvocationID.x][gl_LocalInvocationID.y] * 4.0 + sharedData_0[gl_LocalInvocationID.x + 1U][gl_LocalInvocationID.y] + sharedData_0[gl_LocalInvocationID.x - 1U][gl_LocalInvocationID.y + 1U] + sharedData_0[gl_LocalInvocationID.x][gl_LocalInvocationID.y + 1U] + sharedData_0[gl_LocalInvocationID.x + 1U][gl_LocalInvocationID.y + 1U]) / 12.0).xyz, vec3(0.10000000149011612));
 
 #line 70
     }
