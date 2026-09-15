@@ -22,62 +22,65 @@ Written against and verified working with **Slang [v2026.17.1](https://github.co
 
 ## Package layout
 
-- **`odin-slang/`** - the `slang` Odin package (the binding itself).
+- **`slang/`** - the `slang` Odin package (the binding itself).
 - **`include/`** - the Slang headers this binding was written against, plus Slang's own `LICENSE-slang.txt`. Kept for reference when extending the binding.
 - **`demo/`** - a small end-to-end example: compiles a vertex/fragment `.slang` file and a compute `.slang` file down to GLSL.
 
 ## Using the COM-lite interfaces
 
-Every Slang object derives from `ISlangUnknown`. In Odin, call methods with the `->` syntax and release objects explicitly when you're done with them:
+Every Slang object derives from `ISlangUnknown`, and every method lives on a raw C-style vtable (an out-pointer parameter for the result, a `slang.Result`/nil return for failure) - that ABI shape is fixed by Slang itself. This package provides idiomatic Odin wrapper procs (snake_case, e.g. `->create_session(...)`) that turn each out-pointer into a normal return value plus an `ok: bool`, so you don't preallocate result variables yourself - use those rather than the raw `->MethodName(...)` form. The vtable struct types (and their UUIDs) are private to the package specifically to signal this: they aren't the intended way to interact with the library, even though Odin doesn't fully block calling through them.
+
+Every interface (`Global_Session`, `Session`, `Module`, `Component_Type`, `Entry_Point`, `Blob`, ...) converts implicitly to `^Unknown` via Odin's `#subtype`, so instead of calling `->Release()` on each concrete type, release everything through the single `release()` proc. It's a no-op on `nil`, so it can be deferred unconditionally - even for optional outputs like diagnostics blobs that may or may not have been produced:
 
 ```odin
-import slang "odin-slang"
+import slang "slang"
 
-global_session: ^slang.IGlobalSession
-slang.createGlobalSession(slang.API_VERSION, &global_session)
-defer global_session->Release()
+global_session, ok := slang.create_global_session()
+if !ok {
+    // handle failure
+}
+defer slang.release(global_session)
 
 session_desc := slang.session_desc_default()
 // ... fill in session_desc.targets / searchPaths ...
 
-session: ^slang.ISession
-global_session->CreateSession(&session_desc, &session)
-defer session->Release()
-
-diagnostics: ^slang.IBlob
-module := session->LoadModule("shader.slang", &diagnostics)
-if diagnostics != nil {
-    fmt.eprintln(cstring(diagnostics->GetBufferPointer()))
-    diagnostics->Release()
-}
-if module == nil {
+session, ok := global_session->create_session(&session_desc)
+if !ok {
     // handle failure
 }
-defer module->Release()
+defer slang.release(session)
+
+module, diagnostics, module_ok := session->load_module("shader.slang")
+defer slang.release(diagnostics)
+if diagnostics != nil {
+    fmt.eprintln(cstring(diagnostics->get_buffer_pointer()))
+}
+if !module_ok {
+    // handle failure
+}
+defer slang.release(module)
 ```
 
-`IModule` and `IEntryPoint` are themselves `IComponentType`s (via Odin's `#subtype`), so they can be passed directly to `ISession.CreateCompositeComponentType`:
+Note that `Session` itself is a private type - `create_session` returns `^slang.Session`, but you hold it through `:=` type inference rather than spelling the type out. That's true of every interface handle except `Blob` and `Component_Type`, which you do name directly (e.g. in a slice literal below).
+
+`Module` and `Entry_Point` are themselves `Component_Type`s (via Odin's `#subtype`), so they can be passed directly to `session.create_composite_component_type`:
 
 ```odin
-entry_point: ^slang.IEntryPoint
-module->FindAndCheckEntryPoint("main", .COMPUTE, &entry_point, &diagnostics)
-defer entry_point->Release()
+entry_point, _, entry_point_ok := module->find_and_check_entry_point("main", .COMPUTE)
+defer slang.release(entry_point)
 
-components := []^slang.IComponentType{module, entry_point}
-program: ^slang.IComponentType
-session->CreateCompositeComponentType(raw_data(components), len(components), &program, &diagnostics)
-defer program->Release()
+components := []^slang.Component_Type{module, entry_point}
+program, _, program_ok := session->create_composite_component_type(components)
+defer slang.release(program)
 
-linked: ^slang.IComponentType
-program->Link(&linked, &diagnostics)
-defer linked->Release()
+linked, _, linked_ok := program->link()
+defer slang.release(linked)
 
-code: ^slang.IBlob
-linked->GetEntryPointCode(0, 0, &code, &diagnostics)
-defer code->Release()
+code, _, code_ok := linked->get_entry_point_code(0, 0)
+defer slang.release(code)
 ```
 
-Most fallible calls return a `slang.Result`; check it with `slang.succeeded(result)` / `slang.failed(result)`. A handful of convenience calls (`LoadModule`, `SpecializeType`, ...) return the object pointer directly and are `nil` on failure instead - matching slang.h.
+Every wrapper proc returns `ok: bool` as its last value; where the underlying call also produces a diagnostics blob, that comes back as the second-to-last value (`nil` when there's nothing to report). Work with `slang.Result` directly via `slang.succeeded`/`slang.failed` if you need it.
 
 See `demo/main.odin` for a complete, runnable example.
 
@@ -92,10 +95,10 @@ See `demo/main.odin` for a complete, runnable example.
 
 This repo does not vendor Slang's compiled binaries - `*.dll`/`*.lib`/`*.so`/`*.dylib` are gitignored, so you need to supply your own copy after every fresh checkout. Download a release from the [Slang releases page](https://github.com/shader-slang/slang/releases) (or build Slang yourself from the `slang/` submodule/checkout) for your platform, then:
 
-- **Windows**: copy `slang.lib` next to the binding (`odin-slang/slang.lib`) so the Odin linker can find it, and copy `slang.dll` next to whatever executable links against the binding (e.g. `demo/`). Recent Slang releases split the compiler itself out into `slang-compiler.dll`, which `slang.dll` loads at runtime - copy that alongside it too. Add whichever of `slang-rt.dll`, `slang-glslang.dll`, `slang-glsl-module.dll`, `slang-llvm.dll` your target formats need (GLSL output needs `slang-glslang.dll` and `slang-glsl-module.dll`).
+- **Windows**: copy `slang.lib` next to the binding (`slang/slang.lib`) so the Odin linker can find it, and copy `slang.dll` next to whatever executable links against the binding (e.g. `demo/`). Recent Slang releases split the compiler itself out into `slang-compiler.dll`, which `slang.dll` loads at runtime - copy that alongside it too. Add whichever of `slang-rt.dll`, `slang-glslang.dll`, `slang-glsl-module.dll`, `slang-llvm.dll` your target formats need (GLSL output needs `slang-glslang.dll` and `slang-glsl-module.dll`).
 - **Linux/macOS**: copy `libslang.so`/`libslang.dylib` (and friends) somewhere your dynamic linker can find them (e.g. alongside the executable, or a directory on `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`).
 
-`odin-slang/` is where `foreign import` resolves the `.lib` from; the runtime shared libraries need to be next to (or discoverable by) the final built executable. Since none of this is tracked in git, re-copy these files after cloning the repo fresh.
+`slang/` is where `foreign import` resolves the `.lib` from; the runtime shared libraries need to be next to (or discoverable by) the final built executable. Since none of this is tracked in git, re-copy these files after cloning the repo fresh.
 
 ### Running the demo
 
@@ -109,7 +112,7 @@ This compiles `shaders/VertexDemo.slang` and `shaders/ComputeDemo.slang` to GLSL
 
 ## Extending the binding
 
-`odin-slang/` mirrors the subset of `include/slang.h` needed for a full module-load -> link -> emit-code pipeline (`IGlobalSession`, `ISession`, `IComponentType`, `IModule`, `IEntryPoint`, `IBlob`). Reflection types (`TypeReflection`, `TypeLayoutReflection`, `ProgramLayout`, `FunctionReflection`, `DeclReflection`) and a few peripheral interfaces (`ISlangFileSystem`, `ISlangSharedLibrary`, ...) are declared as opaque pointer types - the ABI shapes are reserved but their vtables aren't bound yet.
+`slang/` mirrors the subset of `include/slang.h` needed for a full module-load -> link -> emit-code pipeline (`Global_Session`, `Session`, `Component_Type`, `Module`, `Entry_Point`, `Blob` - Slang's own C++ API spells these with a leading `I`, e.g. `IGlobalSession`; this binding drops it). Reflection types (`Type_Reflection`, `Type_Layout_Reflection`, `Program_Layout`, `Function_Reflection`, `Decl_Reflection`) and a few peripheral interfaces (`Slang_File_System`, `Slang_Shared_Library`, ...) are declared as opaque pointer types - the ABI shapes are reserved but their vtables aren't bound yet.
 
 When binding a new interface method, remember:
 

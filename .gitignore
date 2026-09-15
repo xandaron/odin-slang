@@ -2,7 +2,7 @@ build/
 bin/
 
 # Slang release binaries (slang.dll, slang-compiler.dll, slang-rt.dll, ...) -
-# not vendored; copy your own into odin-slang/ (to link) and next to built
+# not vendored; copy your own into slang/ (to link) and next to built
 # executables like demo/ (to run). See README.md.
 *.dll
 *.lib
