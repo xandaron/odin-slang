@@ -26,61 +26,105 @@ Written against and verified working with **Slang [v2026.17.1](https://github.co
 - **`include/`** - the Slang headers this binding was written against, plus Slang's own `LICENSE-slang.txt`. Kept for reference when extending the binding.
 - **`demo/`** - a small end-to-end example: compiles a vertex/fragment `.slang` file and a compute `.slang` file down to GLSL.
 
-## Using the COM-lite interfaces
+## Usage
 
-Every Slang object derives from `ISlangUnknown`, and every method lives on a raw C-style vtable (an out-pointer parameter for the result, a `slang.Result`/nil return for failure) - that ABI shape is fixed by Slang itself. This package provides idiomatic Odin wrapper procs (snake_case, e.g. `->create_session(...)`) that turn each out-pointer into a normal return value plus an `ok: bool`, so you don't preallocate result variables yourself - use those rather than the raw `->MethodName(...)` form. The vtable struct types (and their UUIDs) are private to the package specifically to signal this: they aren't the intended way to interact with the library, even though Odin doesn't fully block calling through them.
+Every Slang object derives from `ISlangUnknown`, and every method lives on a raw C-style vtable (an out-pointer parameter for the result, a `slang.Result` return for failure) - that ABI shape is fixed by Slang itself. This package wraps each vtable method in an idiomatic snake_case **free procedure** that takes the object as its first argument and turns out-pointers into ordinary return values plus an `ok: bool`:
 
-Every interface (`Global_Session`, `Session`, `Module`, `Component_Type`, `Entry_Point`, `Blob`, ...) converts implicitly to `^Unknown` via Odin's `#subtype`, so instead of calling `->Release()` on each concrete type, release everything through the single `release()` proc. It's a no-op on `nil`, so it can be deferred unconditionally - even for optional outputs like diagnostics blobs that may or may not have been produced:
+```odin
+// C++:  session->loadModule("shader", diagnostics.writeRef());
+module, diagnostics, ok := slang.load_module(session, "shader")
+```
+
+The vtable structs (and their UUIDs) are private to the package: the wrapper procs are the API, and calling through `->MethodName(...)` isn't supported.
+
+### Return values
+
+- Every wrapper that can fail returns `ok: bool` as its **last** value. If you need the raw `slang.Result`, check it with `slang.succeeded`/`slang.failed`.
+- If the underlying call can produce diagnostics, they come back as a `^slang.Blob` in the **second-to-last** position, or `nil` when there's nothing to report. Pass that blob to `slang.print_diagnostics`, which prints it to stderr if there is one and then releases it. It accepts `nil`, so you can call it on every diagnostics result without checking first.
+
+### Lifetime
+
+Every interface (`Global_Session`, `Session`, `Module`, `Component_Type`, `Entry_Point`, `Blob`, ...) converts implicitly to `^slang.Unknown` via Odin's `#subtype`, so you release all of them with one proc, `slang.release`. It's a no-op on `nil`, so you can `defer` it unconditionally, even for optional outputs like diagnostics blobs. Once every object has been released you can optionally call `slang.shutdown()` to free Slang's global allocations (e.g. to keep leak detectors quiet).
+
+### Example
+
+Create a global session and a session targeting GLSL:
 
 ```odin
 import slang "slang"
 
-global_session, ok := slang.create_global_session()
-if !ok {
+global_session, global_session_ok := slang.create_global_session()
+if !global_session_ok {
     // handle failure
 }
 defer slang.release(global_session)
 
-session_desc := slang.session_desc_default()
-// ... fill in session_desc.targets / searchPaths ...
+search_paths := []cstring{"./shaders"}
 
-session, ok := global_session->create_session(&session_desc)
-if !ok {
+target := slang.target_desc_default()
+target.format = .GLSL
+targets := []slang.Target_Desc{target}
+
+session_desc := slang.session_desc_default()
+session_desc.targets = raw_data(targets)
+session_desc.targetCount = len(targets)
+session_desc.searchPaths = raw_data(search_paths)
+session_desc.searchPathCount = len(search_paths)
+
+session, session_ok := slang.create_session(global_session, &session_desc)
+if !session_ok {
     // handle failure
 }
 defer slang.release(session)
+```
 
-module, diagnostics, module_ok := session->load_module("shader.slang")
-defer slang.release(diagnostics)
-if diagnostics != nil {
-    fmt.eprintln(cstring(diagnostics->get_buffer_pointer()))
-}
+Load a module, find an entry point, then compose, link, and emit code:
+
+```odin
+module, module_diagnostics, module_ok := slang.load_module(session, "ComputeDemo")
+slang.print_diagnostics(module_diagnostics)
 if !module_ok {
     // handle failure
 }
 defer slang.release(module)
-```
 
-Note that `Session` itself is a private type - `create_session` returns `^slang.Session`, but you hold it through `:=` type inference rather than spelling the type out. That's true of every interface handle except `Blob` and `Component_Type`, which you do name directly (e.g. in a slice literal below).
-
-`Module` and `Entry_Point` are themselves `Component_Type`s (via Odin's `#subtype`), so they can be passed directly to `session.create_composite_component_type`:
-
-```odin
-entry_point, _, entry_point_ok := module->find_and_check_entry_point("main", .COMPUTE)
+entry_point, entry_diagnostics, entry_ok := slang.find_and_check_entry_point(module, "computeMain", .COMPUTE)
+slang.print_diagnostics(entry_diagnostics)
+if !entry_ok {
+    // handle failure
+}
 defer slang.release(entry_point)
 
+// Module and Entry_Point are Component_Types via #subtype, so they go
+// straight into the slice.
 components := []^slang.Component_Type{module, entry_point}
-program, _, program_ok := session->create_composite_component_type(components)
+program, program_diagnostics, program_ok := slang.create_composite_component_type(session, components)
+slang.print_diagnostics(program_diagnostics)
+if !program_ok {
+    // handle failure
+}
 defer slang.release(program)
 
-linked, _, linked_ok := program->link()
+linked, link_diagnostics, link_ok := slang.link(program)
+slang.print_diagnostics(link_diagnostics)
+if !link_ok {
+    // handle failure
+}
 defer slang.release(linked)
 
-code, _, code_ok := linked->get_entry_point_code(0, 0)
+code, code_diagnostics, code_ok := slang.get_entry_point_code(linked, 0, 0)
+slang.print_diagnostics(code_diagnostics)
+if !code_ok {
+    // handle failure
+}
 defer slang.release(code)
+
+glsl := string(([^]u8)(slang.get_buffer_pointer(code))[:slang.get_buffer_size(code)])
 ```
 
-Every wrapper proc returns `ok: bool` as its last value; where the underlying call also produces a diagnostics blob, that comes back as the second-to-last value (`nil` when there's nothing to report). Work with `slang.Result` directly via `slang.succeeded`/`slang.failed` if you need it.
+Because of `#subtype`, procs written for a base interface also accept derived ones. For example, `slang.link` and `slang.get_entry_point_code` take `^Component_Type`, and you can pass a `^Module` to them directly.
+
+`Global_Session`, `Session`, `Module`, and `Entry_Point` are private types. You hold them through `:=` type inference instead of naming them. `Blob` and `Component_Type` are public because you need to name them yourself, e.g. in helper signatures and in the components slice above.
 
 See `demo/main.odin` for a complete, runnable example.
 
@@ -119,6 +163,15 @@ When binding a new interface method, remember:
 - Vtable order must match `include/slang.h` exactly - method names don't matter for the ABI, only position.
 - Enum backing types must match the `...Integral` typedef in `slang.h` (commonly `i32` or `u32`, *not* Odin's default `int`).
 - Plain-data structs (`SessionDesc`, `TargetDesc`, ...) must keep field order and types identical to their C++ definitions; Odin's default struct layout follows the same natural-alignment rules as C++, so no manual padding is needed as long as types/order match.
+- Add a public snake_case free-proc wrapper next to the vtable that takes the object as `this` and follows the return conventions above: out-pointers become named return values, then `diagnostics: ^Blob` if the call has one, then `ok: bool`. For example:
+
+  ```odin
+  load_module :: proc(this: ^Session, module_name: cstring) -> (module: ^Module, diagnostics: ^Blob, ok: bool) {
+      module = this->LoadModule(module_name, &diagnostics)
+      ok = module != nil
+      return
+  }
+  ```
 
 ## License
 
